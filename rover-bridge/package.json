@@ -1,0 +1,15 @@
+{
+  "name": "rover-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Relays rover movement commands from the cloud backend's SignalR hub to the Arduino's serial port.",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@microsoft/signalr": "^8.0.7",
+    "serialport": "^12.0.0",
+    "ws": "^8.18.0"
+  }
+}

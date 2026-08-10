@@ -1,0 +1,13 @@
+profiles:
+  default:
+    fqbn: 
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - dependency: Adafruit BusIO (1.17.4)
+      - dependency: Adafruit GFX Library (1.12.6)
+      - Adafruit MPU6050 (2.2.9)
+      - dependency: Adafruit SSD1306 (2.5.17)
+      - dependency: Adafruit Unified Sensor (1.1.15)
+
+default_profile: default
