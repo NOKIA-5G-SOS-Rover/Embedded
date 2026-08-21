@@ -53,13 +53,18 @@ BATTERY_R2_OHMS = 10000   # TODO: your actual bottom resistor (GND side)
 BATTERY_V_EMPTY = 3.0     # TODO: your battery's empty voltage (single Li-ion/LiPo cell ~3.0V)
 BATTERY_V_FULL = 4.2      # TODO: your battery's full voltage (single Li-ion/LiPo cell ~4.2V)
 # Multi-cell pack: multiply BOTH of the above by cell count (e.g. 2S: 6.0 / 8.4)
-ENABLE_TELEMETRY = True
+ENABLE_TELEMETRY = False  # /telemetry isn't deployed on the backend yet (404s) - re-enable once it is
 TELEMETRY_INTERVAL_SECONDS = 5
 
 # ---------- Command handling / watchdog ----------
 MOVING_COMMANDS = {"forward", "backward", "turn-left", "turn-right", "arc-left", "arc-right"}
 # Backstop for a truly hung/dropped connection, not a tight liveness check -
-# see earlier discussion re: whether the frontend resends while held.
+# see earlier discussion re: whether the frontend resends while held. NOTE:
+# the frontend only sends a drive command once on button-down and "stop" on
+# button-up (confirmed, no repeat-while-held), so this watchdog CANNOT be
+# tightened to catch a dropped connection quickly - a held button and a dead
+# socket look identical from here. The real disconnect handling now lives in
+# on_hub_error()/on_hub_closed() below.
 WATCHDOG_TIMEOUT_SECONDS = 10.0
 
 # ---------- Autonomy ----------
@@ -85,7 +90,7 @@ HOLD_COOLDOWN_SECONDS = 120.0
 # rover. It runs as a child of this process (see ml_supervisor_loop), so it
 # shares this container's network namespace and localhost is correct.
 ML_SCRIPT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "ml_RecordAndDetect.py"
+    os.path.dirname(os.path.abspath(__file__)), "ml.py"
 )
 
 # Each camera now runs its OWN local server (ml_RecordAndDetect.py's
@@ -101,8 +106,16 @@ CAM_PORTS = {
 # devices). Set here as the single source of truth instead of letting
 # ml_RecordAndDetect.py's own defaults drift out of sync with this file.
 CAM_DEVICES = {
-    "cam1": os.getenv("CAM1_DEVICE", "2"),
-    "cam2": os.getenv("CAM2_DEVICE", "0"),
+    "cam1": os.getenv(
+        "CAM1_DEVICE",
+        "/dev/v4l/by-path/"
+        "platform-xhci-hcd.2.auto-usb-0:1.2:1.0-video-index0",
+    ),
+    "cam2": os.getenv(
+        "CAM2_DEVICE",
+        "/dev/v4l/by-path/"
+        "platform-xhci-hcd.2.auto-usb-0:1.4.2:1.0-video-index0",
+    ),
 }
 ML_API_BASES = {
     camera_id: os.getenv(f"{camera_id.upper()}_API_BASE", f"http://localhost:{port}")
@@ -631,6 +644,21 @@ def ml_supervisor_loop():
 # ============================================================
 # SignalR connection
 # ============================================================
+# Tracks when the hub connection was lost so on_reconnected() can report
+# exactly how long the rover was uncontrollable, instead of guessing from
+# log timestamps by hand. Set by on_hub_closed()/on_hub_error(), cleared
+# once a reconnect is confirmed.
+connection_lost_at = None
+connection_lost_lock = threading.Lock()
+
+
+def _mark_connection_lost():
+    global connection_lost_at
+    with connection_lost_lock:
+        if connection_lost_at is None:
+            connection_lost_at = time.time()
+
+
 def register_robot():
     print("Registering as", repr(ROBOT_GROUP_ID))
     try:
@@ -649,7 +677,16 @@ def on_reconnected():
     # signalrcore fires on_open only for the very first connection, and
     # on_reconnect for every subsequent automatic reconnect - group
     # membership does not survive a reconnect, so re-register here too.
-    print("Reconnected to DashboardHub - re-registering")
+    global connection_lost_at
+    with connection_lost_lock:
+        lost_at = connection_lost_at
+        connection_lost_at = None
+
+    if lost_at is not None:
+        downtime = time.time() - lost_at
+        print(f"Reconnected to DashboardHub after {downtime:.1f}s downtime - re-registering")
+    else:
+        print("Reconnected to DashboardHub (no recorded disconnect time) - re-registering")
     register_robot()
 
 
@@ -658,11 +695,30 @@ def on_registered(args):
 
 
 def on_hub_closed():
-    print("Disconnected from DashboardHub - stopping motors as a precaution")
+    _mark_connection_lost()
+    print(f"Disconnected from DashboardHub at {datetime.now(timezone.utc).isoformat()} - stopping motors as a precaution")
     try:
         safe_bridge_call("cmd_stop")
     except Exception as e:
         print("Stop-on-disconnect failed:", e)
+
+
+def on_hub_error(data):
+    # signalrcore surfaces transport-level failures (dropped socket, failed
+    # send, etc.) here, and this often fires before/instead of on_close for
+    # a connection that just goes silent rather than closing cleanly. This
+    # is the main defense against "button pressed, wifi dies, robot keeps
+    # driving": the frontend only sends a drive command once on button-down
+    # and "stop" once on button-up (no repeat-while-held), so the watchdog
+    # can't distinguish a held button from a dead connection and stays as a
+    # 10s last-resort backstop only. This handler is what actually reacts
+    # quickly to a lost connection.
+    _mark_connection_lost()
+    print("SignalR ERROR:", data, "- stopping motors as a precaution")
+    try:
+        safe_bridge_call("cmd_stop")
+    except Exception as e:
+        print("Stop-on-error failed:", e)
 
 
 hub_connection = (
@@ -683,7 +739,7 @@ hub_connection.on("RobotRegistered", on_registered)
 hub_connection.on_open(on_connected)
 hub_connection.on_reconnect(on_reconnected)
 hub_connection.on_close(on_hub_closed)
-hub_connection.on_error(lambda data: print("SignalR ERROR:", data))
+hub_connection.on_error(on_hub_error)
 hub_connection.start()
 
 # ============================================================
