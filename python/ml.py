@@ -86,15 +86,15 @@ SESSION_ID = os.getenv(
     "session-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S"),
 )
 
-# Preserve the current script's camera identity defaults. Override these with
-# CAM1_DEVICE / CAM2_DEVICE if your working mapping is the opposite way around.
+# Use the exact camera symlinks exposed by this board. These are the visible
+# webcam devices that correspond to the Logitech USB cameras on the rover.
 CAMERAS = [
     {
         "id": "cam1",
         "device": os.getenv(
             "CAM1_DEVICE",
             "/dev/v4l/by-path/"
-            "platform-xhci-hcd.2.auto-usb-0:1.2:1.0-video-index0",
+            "platform-xhci-hcd.2.auto-usb-0:1.4.2:1.0-video-index0",
         ),
         "port": int(os.getenv("CAM1_PORT", "8081")),
     },
@@ -103,7 +103,7 @@ CAMERAS = [
         "device": os.getenv(
             "CAM2_DEVICE",
             "/dev/v4l/by-path/"
-            "platform-xhci-hcd.2.auto-usb-0:1.4.2:1.0-video-index0",
+            "platform-xhci-hcd.2.auto-usb-0:1.2:1.2-video-index0",
         ),
         "port": int(os.getenv("CAM2_PORT", "8082")),
     },
@@ -145,6 +145,36 @@ RELAY_REPORT_INTERVAL_SECONDS = float(
 INFERENCE_IDLE_SLEEP_SECONDS = float(
     os.getenv("INFERENCE_IDLE_SLEEP_SECONDS", "0.002")
 )
+
+
+# reduce the alerts 
+ALERT_CONFIRM_FRAMES = int(os.getenv("ALERT_CONFIRM_FRAMES", "3"))
+ALERT_CLEAR_FRAMES = int(os.getenv("ALERT_CLEAR_FRAMES", "3"))
+
+# GPS location cache (read-only from main.py)
+GPS_SHARED_FILE = os.getenv("GPS_SHARED_FILE", "/tmp/rover_gps.json")
+GPS_MAX_AGE_SECONDS = float(os.getenv("GPS_MAX_AGE_SECONDS", "30"))
+
+
+def read_latest_location() -> Optional[Tuple[float, float]]:
+    """Reads the location cache main.py maintains. This process has no
+    knowledge of GPS/serial - if the file is missing, stale, or has no fix,
+    location is simply omitted from the alert payload."""
+    try:
+        with open(GPS_SHARED_FILE, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not data.get("fix"):
+        return None
+    updated_at = data.get("updated_at")
+    if updated_at is None or (time.time() - updated_at) > GPS_MAX_AGE_SECONDS:
+        return None
+    lat, lon = data.get("lat"), data.get("lon")
+    if lat is None or lon is None:
+        return None
+    return lat, lon
 
 
 @dataclass
@@ -362,7 +392,11 @@ class CameraPipeline:
         # Latest inference result. These boxes are deliberately overlaid onto
         # newer video frames until the next inference result arrives.
         self.detections: List[Detection] = []
+
+        # alert reduction
         self.person_present = False
+        self.person_detection_streak = 0
+        self.person_missing_streak = 0
 
         # Cached JPEG used by ALL consumers; no per-request re-encoding.
         self.latest_jpeg: Optional[bytes] = None
@@ -629,16 +663,45 @@ class CameraPipeline:
         frame: np.ndarray,
     ) -> None:
         present = len(detections) > 0
+        trigger_alert = False
 
         with self.lock:
-            was_present = self.person_present
-            self.person_present = present
+            if present:
+                # person detected in the inference frame
+                self.person_detection_streak += 1
+                self.person_missing_streak = 0
 
-        if not present or was_present:
+                # only confirm after N consecutive detections
+                if (
+                    not self.person_present 
+                    and self.person_detection_streak >= ALERT_CONFIRM_FRAMES
+                ):
+                    self.person_present = True
+                    trigger_alert = True
+            else:
+                # no person in this inference frame 
+                self.person_detection_streak = 0
+                if self.person_present:
+                    self.person_missing_streak += 1
+
+                    # only re arm the alert after several consecutive misses
+                    if self.person_missing_streak >= ALERT_CLEAR_FRAMES:
+                        self.person_present = False
+                        self.person_missing_streak = 0
+                else:
+                    self.person_missing_streak = 0
+
+        if not trigger_alert:
             return
 
         best = max(detections, key=lambda detection: detection.confidence)
 
+        log.info(
+           "%s: person confirmed after %d consecutive inference frames",
+            self.camera_id,
+            ALERT_CONFIRM_FRAMES,
+        )
+        
         threading.Thread(
             target=self.report_person,
             args=(best, frame.copy()),
@@ -647,14 +710,14 @@ class CameraPipeline:
         ).start()
 
     def report_person(self, detection: Detection, frame: np.ndarray) -> None:
+        location = read_latest_location()
+
         payload = {
             "roverId": ROVER_ID,
             "sessionId": SESSION_ID,
             "alertType": "Human Detected",
             "source": "YOLOv26-Camera",
             "detectedAt": datetime.now(timezone.utc).isoformat(),
-            "locationX": float(detection.x1),
-            "locationY": float(detection.y1),
             "boundingBoxWidth": max(float(detection.x2 - detection.x1), 0.1),
             "boundingBoxHeight": max(float(detection.y2 - detection.y1), 1.0),
             "confidenceScore": float(detection.confidence),
@@ -663,6 +726,8 @@ class CameraPipeline:
             "cameraId": self.camera_id,
             "status": "NEW",
         }
+        if location is not None:
+            payload["locationX"], payload["locationY"] = location
 
         # Keep event creation + its image upload on one persistent session.
         with self.alert_http_lock:

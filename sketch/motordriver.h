@@ -26,6 +26,8 @@ class Rover {
     void turnLeft(int speed);
     void driveLeft(int speed);
     void driveRight(int speed);
+    void reverseArcLeft(int speed);
+    void reverseArcRight(int speed);
     void forward(int speed);
     void backward(int speed);
     void stop();

@@ -29,6 +29,8 @@ const COMMAND_TO_CHAR = {
   'turn-right': 'r',
   'arc-left': 'q',
   'arc-right': 'e',
+  'reverse-arc-left': 'z',
+  'reverse-arc-right': 'c',
 };
 
 let port = null;

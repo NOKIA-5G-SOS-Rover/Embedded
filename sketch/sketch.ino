@@ -53,8 +53,8 @@ void applyMotorCommand(DriveCommand cmd, int speed) {
     case CMD_TURN_RIGHT: myRover.turnRight(speed); break;
     case CMD_ARC_LEFT:          myRover.driveLeft(speed); break;
     case CMD_ARC_RIGHT:         myRover.driveRight(speed); break;
-    case CMD_REVERSE_ARC_LEFT:  myRover.driveLeft(-speed); break;
-    case CMD_REVERSE_ARC_RIGHT: myRover.driveRight(-speed); break;
+    case CMD_REVERSE_ARC_LEFT:  myRover.reverseArcLeft(speed); break;
+    case CMD_REVERSE_ARC_RIGHT: myRover.reverseArcRight(speed); break;
     case CMD_STOP:              myRover.stop(); break;
   }
 }

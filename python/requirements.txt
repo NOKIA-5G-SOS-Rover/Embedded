@@ -1,5 +1,5 @@
-numpy>=1.23
-opencv-python-headless>=4.7
 signalrcore
 requests
+numpy
 onnxruntime
+pyserial

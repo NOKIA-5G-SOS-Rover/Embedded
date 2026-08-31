@@ -60,6 +60,14 @@ void Rover::driveLeft(int speed) {
     rightMotor.drive(innerSpeed); 
 }
 
+void Rover::reverseArcLeft(int speed) {
+    driveLeft(-speed);
+}
+
+void Rover::reverseArcRight(int speed) {
+    driveRight(-speed);
+}
+
 void Rover::forward(int speed) {
     leftMotor.drive(-speed); 
     rightMotor.drive(speed);  
