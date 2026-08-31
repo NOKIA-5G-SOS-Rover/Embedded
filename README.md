@@ -6,6 +6,8 @@
 
 *Remote control · person detection · live video · autonomous approach · 5G/LTE uplink*
 
+*To connect to the rover use the address: arduino@192.168.1.236 password: 0012345G*
+
 </div>
 
 ---
